@@ -1,3 +1,7 @@
+from datetime import datetime
+
+from .constants.hold_registers import H_TIME_YEAR_MONTH, H_TIME_DATE_HOUR, H_TIME_MINUTE_SECOND
+
 ALL_PV_STRINGS = frozenset(range(1, 7))
 
 # Hold register 20 (PVInputModel) says which PV inputs are in use, but two mappings
@@ -138,3 +142,29 @@ def energy_balance(registers: dict, add, subtract=()) -> int | None:
         total += sign * value
 
     return total
+
+
+def decode_inverter_clock(hold: dict) -> datetime | None:
+    """Return the inverter's clock from hold registers 12-14 as a naive datetime.
+
+    Each register packs two fields, low byte first: year-2000 | month<<8,
+    day | hour<<8 and minute | second<<8. The result is the wall-clock time the inverter
+    keeps, which carries no timezone of its own.
+
+    Returns None when a register has not been read yet or the fields are not a real
+    date, which is what an inverter that has not started up fully reports.
+    """
+    year_month = hold.get(H_TIME_YEAR_MONTH)
+    date_hour = hold.get(H_TIME_DATE_HOUR)
+    minute_second = hold.get(H_TIME_MINUTE_SECOND)
+    if year_month is None or date_hour is None or minute_second is None:
+        return None
+
+    try:
+        return datetime(
+            2000 + (year_month & 0xFF), year_month >> 8,
+            date_hour & 0xFF, date_hour >> 8,
+            minute_second & 0xFF, minute_second >> 8,
+        )
+    except ValueError:
+        return None

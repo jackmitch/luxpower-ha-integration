@@ -148,6 +148,7 @@ Provides detailed operational data, including:
 * Temperatures (Battery, Radiator, etc.)
 * Voltages, Currents, and Frequencies for Grid, EPS, and Battery.
 * Calculated Load Percentage
+* Inverter Time. The clock the inverter keeps, which its charge and discharge windows follow. It is plain wall-clock time with no timezone, and whether it follows daylight saving depends on what sets it, so it can be left on the wrong time. Use it to spot a skewed clock, or point Predbat's `inverter_time` setting at it: `inverter_time: sensor.<prefix>_inverter_time`.
 
 #### Numbers
 Allows control over inverter settings:

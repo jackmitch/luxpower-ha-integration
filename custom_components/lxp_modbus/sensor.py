@@ -1,11 +1,12 @@
 import logging
 import re
-from datetime import time as dt_time
+from datetime import time as dt_time, timedelta
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from homeassistant.const import Platform
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -46,6 +47,11 @@ def _apply_pv_availability(desc: dict, pv_strings) -> dict:
     return {**desc, "enabled": False}
 
 
+def _sensor_class(desc: dict):
+    """Return the entity class for a sensor description."""
+    return ModbusBridgeClockSensor if "extract_clock" in desc else ModbusBridgeSensor
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up sensor entities from a config entry."""
     is_read_only = entry.data.get(CONF_READ_ONLY, DEFAULT_READ_ONLY)
@@ -67,8 +73,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     # Create a list to hold all the entities we're about to create
     entities = [
-        ModbusBridgeSensor(coordinator, entry, _apply_pv_availability(desc, pv_strings),
-                           entity_prefix, api_client)
+        _sensor_class(desc)(coordinator, entry, _apply_pv_availability(desc, pv_strings),
+                            entity_prefix, api_client)
         for desc in SENSOR_TYPES
     ]
 
@@ -213,6 +219,59 @@ class ModbusBridgeSensor(ModbusBridgeEntity, SensorEntity):
 
         # For any other sensor (like a code), return the raw value directly
         return raw_val
+
+
+class ModbusBridgeClockSensor(ModbusBridgeSensor):
+    """The inverter's clock, which Predbat reads to spot a skewed clock.
+
+    The clock is in settings (hold) registers, which are only re-read every few polls, so
+    the reading is as old as the last settings pass. It keeps running in between, so the
+    reading is advanced by the time since it changed, at no cost in Modbus requests.
+    Otherwise it would look up to several minutes slow, which is a skew Predbat warns about.
+    The changing seconds are what show that the registers were re-read; a clock that has
+    stopped would be advanced from when it was first seen, so this does not detect one.
+    """
+
+    # The clock registers as last read, and when they were first seen
+    _clock_key = None
+    _clock_seen_at = None
+
+    def _source_fingerprint(self):
+        """No cheap fingerprint, so the state is written on every poll.
+
+        The value moves between settings reads, and depends_on names hold registers, which
+        the update filter would look up as input registers. 12-14 are the grid voltages
+        there, so the clock would only update when the grid voltage did.
+        """
+        return None
+
+    @property
+    def native_value(self):
+        """Return the inverter's clock now, as an aware datetime."""
+        hold_data = (self.coordinator.data or {}).get("hold", {})
+        reading = self._desc["extract_clock"](hold_data)
+        if reading is None:
+            return None
+        return self._current_clock(reading, hold_data)
+
+    def _current_clock(self, reading, hold_data):
+        now = dt_util.utcnow()
+        key = tuple(hold_data.get(register) for register in self._desc["depends_on"])
+        if key != self._clock_key:
+            self._clock_key, self._clock_seen_at = key, now
+        reading += now - self._clock_seen_at
+
+        # Minute resolution. Predbat's thresholds are in minutes, and Home Assistant only
+        # records a state that changed, so this is one row a minute however often it polls.
+        reading = (reading + timedelta(seconds=30)).replace(second=0, microsecond=0)
+
+        # The clock has no zone of its own. Read it in Home Assistant's zone, so the
+        # difference from the real time is the inverter's skew. In the repeated hour when
+        # the clocks go back, take whichever reading is closer to now, not always the first,
+        # which would make a correct clock look an hour slow.
+        zone = dt_util.get_default_time_zone()
+        candidates = [reading.replace(tzinfo=zone, fold=fold) for fold in (0, 1)]
+        return min(candidates, key=lambda candidate: abs(candidate - now))
 
 
 class ModbusBridgeBatterySensor(ModbusBridgeSensor):
